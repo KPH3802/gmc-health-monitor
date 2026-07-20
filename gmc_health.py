@@ -9,6 +9,7 @@ import email
 import imaplib
 import os
 import smtplib
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -42,16 +43,60 @@ def check_fmp_api():
         return RED, f"FMP API error: {e}"
 
 
-def check_ib_gateway():
-    """CHECK 2 — IB Gateway process running."""
+# ── Studio IB Gateway probe config ───────────────────────────────────────────
+
+STUDIO_GATEWAY_PORT = 4002                    # IB Gateway paper API port on the Studio
+GATEWAY_EXPECTED_BY = datetime.time(7, 35)    # CT — Studio Gateway starts ~07:30
+TCP_PROBE_TIMEOUT_S = 3
+
+
+def _studio_host():
+    """Resolve the Studio's address from the SAME source of truth gmc_watch uses:
+    the SSH alias ``GMC_STUDIO_HOST`` (default ``studio``), resolved to a
+    connectable HostName via ``~/.ssh/config``. No raw IP is hardcoded here."""
+    alias = os.environ.get("GMC_STUDIO_HOST", "studio")
     try:
-        result = subprocess.run(
-            ["pgrep", "-f", "clientportal"],
+        out = subprocess.run(
+            ["ssh", "-G", alias],
             capture_output=True, text=True, timeout=5,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return GREEN, "Process running"
-        return RED, "IB Gateway process not running \u2014 authenticate before 8AM"
+        for line in out.stdout.splitlines():
+            if line.lower().startswith("hostname "):
+                return line.split(None, 1)[1].strip()
+    except Exception:
+        pass
+    return alias
+
+
+def _tcp_reachable(host, port, timeout=TCP_PROBE_TIMEOUT_S):
+    """True if a TCP connection to host:port completes within ``timeout``."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def check_ib_gateway(now=None):
+    """CHECK 2 — Studio IB Gateway reachable over the network.
+
+    Network reachability probe to the Studio's paper API port (4002): the
+    Gateway process runs on the Studio, not on this watchdog host, so a local
+    process match is meaningless here. Before ~07:35 CT the Studio Gateway has
+    not started yet (~07:30), so an unreachable port is expected (YELLOW) —
+    mirroring the morning-brief pre-window; at/after that it is an error (RED).
+    """
+    now = now or datetime.datetime.now()
+    host = _studio_host()
+    try:
+        if _tcp_reachable(host, STUDIO_GATEWAY_PORT):
+            return GREEN, f"Reachable at {host}:{STUDIO_GATEWAY_PORT}"
+        if now.time() < GATEWAY_EXPECTED_BY:
+            return YELLOW, "Gateway not started yet \u2014 expected"
+        return RED, (
+            f"IB Gateway unreachable at {host}:{STUDIO_GATEWAY_PORT} "
+            "\u2014 start/authenticate before 8AM"
+        )
     except Exception as e:
         return RED, f"IB Gateway check error: {e}"
 
