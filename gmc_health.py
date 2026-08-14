@@ -14,10 +14,13 @@ import sqlite3
 import subprocess
 import sys
 from email.mime.text import MIMEText
+from email.header import decode_header, make_header
+from email.utils import parsedate_to_datetime
 
 import requests
 
 import config
+from vendored import scanner_mail
 
 # ── Status constants ─────────────────────────────────────────────────────────
 
@@ -129,37 +132,135 @@ def check_positions_db():
         return RED, f"positions.db error: {e}"
 
 
-def check_scanner_emails():
-    """CHECK 5 — Scanner emails in last 48 hours via Gmail IMAP."""
-    keywords = [
-        "8-K", "PEAD Scanner", "SI SQUEEZE", "COT",
-        "CEL Scanner", "Crypto Scanner", "Dividend Scanner",
-    ]
+IMAP_LOOKBACK_HOURS = 48   # superset of every per-scanner window; the windowing
+                           # itself lives in scanner_mail's registry, not here
+
+
+def _parse_mail_date(raw):
+    """RFC-5322 Date header -> aware UTC datetime, or None if unusable.
+
+    Always aware: scanner_mail compares each message's time against a cutoff
+    derived from ``now``, and a naive/aware mix raises rather than mis-sorting.
+    """
+    if not raw:
+        return None
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return when.astimezone(datetime.timezone.utc)
+
+
+def _decode_subject(raw):
+    """RFC 2047 encoded-word header -> plain text.
+
+    Live mailbox evidence, 2026-08-14: the dividend-cut scanner's subject
+    arrives as
+        =?utf-8?q?=F0=9F=9F=A2_Dividend_Cut_ALERT=3A_SMHB=2C_MVRL...?=
+    because it leads with an emoji. Matching patterns against that raw string
+    can never succeed - the words are Q-encoded and the spaces are underscores.
+    Any scanner whose subject carries a non-ASCII character is invisible
+    without this step, which is a silent, per-scanner blind spot.
+    """
+    if not raw:
+        return ""
+    try:
+        return str(make_header(decode_header(raw)))
+    except (UnicodeDecodeError, LookupError, ValueError):
+        return raw
+
+
+def _fetch_scanner_subjects(lookback_hours=IMAP_LOOKBACK_HOURS):
+    """Read (when, subject) for recent INBOX mail. ``None`` means UNREADABLE.
+
+    Returning None rather than [] on failure is load-bearing: an empty mailbox
+    and a mailbox we could not open are different facts, and collapsing them
+    reports every scanner dead when the truth is that the check is blind.
+
+    A13. The IMAP credential reaches exactly one place -- the ``login`` call
+    below -- as a module attribute. It is never placed on a command line, never
+    written to a log, and never interpolated into any string this module
+    returns. Nothing in this function shells out or emits output.
+    """
+    mail = None
     try:
         mail = imaplib.IMAP4_SSL(config.IMAP_HOST)
         mail.login(config.IMAP_USER, config.IMAP_PASSWORD)
         mail.select("INBOX", readonly=True)
 
-        since_date = (datetime.datetime.now() - datetime.timedelta(hours=48)).strftime("%d-%b-%Y")
-        _, msg_ids = mail.search(None, f'(SINCE "{since_date}")')
+        since = (datetime.datetime.now() -
+                 datetime.timedelta(hours=lookback_hours)).strftime("%d-%b-%Y")
+        _, msg_ids = mail.search(None, f'(SINCE "{since}")')
 
-        count = 0
-        if msg_ids[0]:
+        rows = []
+        if msg_ids and msg_ids[0]:
             for mid in msg_ids[0].split():
-                _, data = mail.fetch(mid, "(BODY[HEADER.FIELDS (SUBJECT)])")
-                raw_subject = data[0][1].decode("utf-8", errors="replace")
-                msg = email.message_from_string(raw_subject)
-                subject = msg.get("Subject", "")
-                if any(kw.lower() in subject.lower() for kw in keywords):
-                    count += 1
+                _, data = mail.fetch(mid, "(BODY[HEADER.FIELDS (SUBJECT DATE)])")
+                if not data or not data[0]:
+                    continue
+                raw = data[0][1].decode("utf-8", errors="replace")
+                msg = email.message_from_string(raw)
+                when = _parse_mail_date(msg.get("Date", ""))
+                if when is not None:
+                    rows.append((when, _decode_subject(msg.get("Subject", ""))))
+        return rows
+    except Exception:
+        return None
+    finally:
+        if mail is not None:
+            try:
+                mail.logout()
+            except Exception:
+                pass
 
-        mail.logout()
 
-        if count >= 3:
-            return GREEN, f"{count} scanner emails received"
-        return RED, f"Only {count} scanner email(s) in 48h \u2014 check PA tasks"
+#: Distinguishes "caller injected nothing, go and fetch" from an explicit
+#: ``subjects=None``, which scanner_mail defines as UNREADABLE. Overloading one
+#: value for both meant a test asking for the unreadable case silently opened a
+#: live IMAP session instead - caught by test_unreadable_mailbox_is_not_confused
+#: _with_empty, which is the test that exists for exactly that confusion.
+_NOT_INJECTED = object()
+
+
+def check_scanner_emails(now=None, subjects=_NOT_INJECTED):
+    """CHECK 5 -- per-scanner mail presence, each in its own window.
+
+    REPLACES a keyword COUNT that was asked backwards. The old check matched
+    seven keywords against 48h of subjects and graded ``count >= 3`` GREEN, but
+    every keyword matched a scanner's QUIET-DAY subject and none matched its
+    SIGNAL-DAY subject ("PEAD Scanner -- No signal" matched; "PEAD BULL: HY:3"
+    did not). It therefore read greenest when the scanners found nothing, and
+    emitted a false "1 issue found" on 2026-08-14 while all five had run and
+    mailed. A count also cannot name the scanner that went quiet, which is the
+    only fact that lets anyone act -- its runbook line ("check PA tasks") was
+    the check admitting it did not know which task to check.
+
+    Verdicts come from ``vendored/scanner_mail.py``, a byte-identical pinned
+    copy of gmc_engine's ``ops/obs/scanner_mail.py``. Vendored rather than
+    imported because this module runs on the MacBook watchdog host while
+    gmc_engine lives on the Studio; ``vendored/PROVENANCE.json`` pins the hash
+    and the test suite fails on drift.
+
+    ``now``/``subjects`` are injection points for tests only; the live 06:00
+    call passes neither.
+    """
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        if subjects is _NOT_INJECTED:
+            subjects = _fetch_scanner_subjects()
+        report = scanner_mail.classify(subjects, now=now)
+        line = scanner_mail.summary_line(report)
     except Exception as e:
-        return RED, f"IMAP check failed: {e}"
+        # A13: the TYPE only. An IMAP or parse failure's message is not under
+        # our control and this string is emailed and logged.
+        return RED, f"scanner check failed ({type(e).__name__})"
+
+    return (GREEN, line) if report.ok else (RED, line)
 
 
 def check_morning_brief():
