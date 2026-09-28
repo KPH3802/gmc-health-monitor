@@ -82,7 +82,13 @@ REGISTRY: Dict[str, ScannerMailSpec] = {
         examples=("Form 4 Scanner Status - 2026-08-04",)),
     "cross_signal": ScannerMailSpec(
         "cross_signal", ("Cross-Signal Scanner",),
-        examples=("\U0001f4cb Cross-Signal Scanner: No Tier2 signals today",)),
+        examples=("\U0001f4cb Cross-Signal Scanner: No Tier2 signals today",),
+        emails_conditionally=True,
+        note="runs daily on PythonAnywhere and mails ONLY on days it has a Tier-2 "
+             "signal — read from the mailbox on 2026-09-22 (desk); the last-mail date "
+             "is not readable on the Studio (09-25 report §3(b)). The 08-05 example "
+             "subject above shows it once mailed on quiet days too, so its silence is "
+             "UNJUDGEABLE here until a heartbeat expectation exists (R128; R11 sitting)."),
     "dividend_cut": ScannerMailSpec(
         "dividend_cut", ("Dividend Cut", "DIVIDEND CUT SCANNER"),
         examples=("\U0001f7e2 Dividend Cut ALERT: UCPLF — BUY Signal",)),

@@ -3,9 +3,9 @@
  "upstream_repo": "gmc_engine",
  "upstream_path": "ops/obs/scanner_mail.py",
  "upstream_abs_path_on_studio": "/Users/kevinheaney/gmc_engine/ops/obs/scanner_mail.py",
- "upstream_commit": "908ff03b3ea22a6aafe56233b2563b8c78967db3",
- "sha256": "f9bfd8fe060fba3f1bd8aca36243301e91813f484a1bf266558c9d055b89f276",
- "vendored_at": "2026-08-14",
+ "upstream_commit": "265ca17c47c803bafa5809948e5a9e52d665acfb",
+ "sha256": "745784ea589b8e48ec94c920669eca2b60586860f4a3beae6b0eaa8aa93e9593",
+ "vendored_at": "2026-09-28",
  "vendored_by": "JOB-20260814-FRIDAY-SCANNER-MAIL-ROUTE1",
  "why_vendored_not_imported": "gmc_health.py runs on the MacBook watchdog host (its own docstring: 'the Gateway process runs on the Studio, not on this watchdog host'), while gmc_engine lives on the Studio. A PYTHONPATH import would be a cross-machine runtime dependency on a checkout this host may not have, and which self-refreshes from origin on its own schedule. The copy is byte-identical so divergence is detectable by hash rather than by reading.",
  "sync_contract": "test_scanner_mail_check.py recomputes this sha256 every run. It ALSO diffs against the upstream file when that path exists on the running host; when it does not, the test reports a NAMED cannot-verify state and does not pass silently."
